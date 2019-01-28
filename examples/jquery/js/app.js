@@ -10,21 +10,6 @@ jQuery(function ($) {
 	var ESCAPE_KEY = 27;
 
 	var util = {
-		uuid: function () {
-			/*jshint bitwise:false */
-			var i, random;
-			var uuid = '';
-
-			for (i = 0; i < 32; i++) {
-				random = Math.random() * 16 | 0;
-				if (i === 8 || i === 12 || i === 16 || i === 20) {
-					uuid += '-';
-				}
-				uuid += (i === 12 ? 4 : (i === 16 ? (random & 3 | 8) : random)).toString(16);
-			}
-
-			return uuid;
-		},
 		pluralize: function (count, word) {
 			return count === 1 ? word : word + 's';
 		},
@@ -38,9 +23,82 @@ jQuery(function ($) {
 		}
 	};
 
+
+	// The todoData object purely handles data management and storage for the todo list
+	var todoData = {
+		list: [],
+		initialize: function() {
+			// Populate list with localStorage data, if any exists
+			this.list = util.store('todos-jquery');
+			if (this.list === undefined) {
+				this.list = [];
+			}
+		},
+		createTodo: function(todoTitle) {
+			// Add a new todo object to this.list
+			this.list.push({
+				// Note: the id property contains the list index of this todo object, and is also designed to serve as a unique DOM element ID
+				id: todoData.listIndexToDomId(todoData.list.length),
+				title: todoTitle,
+				completed: false
+			});
+			util.store('todos-jquery', this.list);
+		},
+		destroyTodo: function(todoDomId) {
+			var todoListIndex = this.domIDToListIndex(todoDomId);
+			this.list.splice(todoListIndex, 1);
+			this.putTodoIdsInOrder();
+			util.store('todos-jquery', this.list);
+		},
+		toggleTodo: function(todoDomId) {
+			var todoListIndex = this.domIDToListIndex(todoDomId);
+			this.list[todoListIndex].completed = !this.list[todoListIndex].completed;
+			util.store('todos-jquery', this.list);
+		},
+		// Sets all todos to be complete or incomplete
+		setCompletenessOfAllTodos: function(isComplete) {
+			this.list.forEach(function(todo) {
+				todo.completed = isComplete;
+			});
+			util.store('todos-jquery', this.list);
+		},
+		destroyCompletedTodos: function() {
+			this.list = this.list.filter(function(todo) {
+				return !todo.completed;
+			});
+			this.putTodoIdsInOrder();
+			util.store('todos-jquery', this.list);
+		},
+		updateTodoTitle(todoDomId, newTitle) {
+			var todoListIndex = this.domIDToListIndex(todoDomId);
+			this.list[todoListIndex].title = newTitle;
+			util.store('todos-jquery', this.list);
+		},
+
+		// The following two internal methods convert between an integer index usable by this.list
+		//   and a unique string ID usable as an element ID in the DOM
+		listIndexToDomId: function(listIndex) {
+			return 'todo' + listIndex;
+		},
+		domIDToListIndex: function(domId) {
+			return parseInt(domId.substr('todo'.length));
+		},
+		// Internal method for putting IDs back in order after having deleted some todos
+		putTodoIdsInOrder: function() {
+			for (var i = 0; i < this.list.length; i++) {
+				this.list[i].id = this.listIndexToDomId(i);
+			}
+		}
+
+	};
+	// End definition of todoData object
+
+
+
+
 	var App = {
 		init: function () {
-			this.todos = util.store('todos-jquery');
+			todoData.initialize();  // Changed for Beast 2
 			this.todoTemplate = Handlebars.compile($('#todo-template').html());
 			this.footerTemplate = Handlebars.compile($('#footer-template').html());
 			this.bindEvents();
@@ -52,29 +110,101 @@ jQuery(function ($) {
 				}.bind(this)
 			}).init('/all');
 		},
+
+
 		bindEvents: function () {
-			$('#new-todo').on('keyup', this.create.bind(this));
-			$('#toggle-all').on('change', this.toggleAll.bind(this));
-			$('#footer').on('click', '#clear-completed', this.destroyCompleted.bind(this));
+			$('#new-todo').on('keyup', (function(e) {
+					// If user pressed enter with a non-empty input text, create a new todo
+					var $input = $(e.target);
+					var val = $input.val().trim();
+					if (e.which === ENTER_KEY && val) {
+						todoData.createTodo(val);
+						$input.val('');
+						this.render();
+					}
+				}).bind(this));
+			$('#toggle-all').on('change', (function(e) {
+					// Use the checked-ness of the toggle-all checkbox to set the checked-ness of all todos
+					var isChecked = $(e.target).prop('checked');
+					todoData.setCompletenessOfAllTodos(isChecked);
+					this.render();
+				}).bind(this));
+			$('#footer').on('click', '#clear-completed', (function() {
+					todoData.destroyCompletedTodos();
+					this.filter = 'all';
+					this.render();
+				}).bind(this));
+
 			$('#todo-list')
-				.on('change', '.toggle', this.toggle.bind(this))
-				.on('dblclick', 'label', this.edit.bind(this))
-				.on('keyup', '.edit', this.editKeyup.bind(this))
-				.on('focusout', '.edit', this.update.bind(this))
-				.on('click', '.destroy', this.destroy.bind(this));
+				.on('change', '.toggle', (function(e) {
+						// User clicked the checkbox next to a todo, so toggle its checked-ness
+						var liDomId = $(e.target).closest('li').prop('id');
+						todoData.toggleTodo(liDomId);
+						this.render();
+					}).bind(this))
+				.on('dblclick', 'label', (function(e) {
+						// User double-clicked a todo; open it up for editing
+						var $closestLi = $(e.target).closest('li');
+						$closestLi.addClass('editing');
+						$closestLi.find('.edit').focus();  // Focus on the todo-editing text input box
+						// No data has changed yet, so no this.render() required
+
+						// Below are the original lines of this code... I think my version above is equivalent and clearer?
+						// var $input = $(e.target).closest('li').addClass('editing').find('.edit');
+						// $input.val($input.val()).focus();
+					}).bind(this))
+				.on('keyup', '.edit', (function(e) {
+						// This event is triggered when user types in the todo-editing text box
+						// If user pressed enter, blur the focus (will trigger this.update())
+						if (e.which === ENTER_KEY) {
+							e.target.blur();
+						}
+						// If user pressed escape, blur the focus (without saving changes)
+						else if (e.which === ESCAPE_KEY) {
+							$(e.target).data('abort', true).blur();
+						}
+					}).bind(this))
+				.on('focusout', '.edit', (function(e) {
+						var $el = $(e.target);
+						var todoDomId = $el.closest('li').prop('id');
+
+						if ($el.val() === '') {
+							todoData.destroyTodo(todoDomId);
+						}
+						else if ($el.data('abort')) {
+							$el.data('abort', false);
+						} else {
+							todoData.updateTodoTitle(todoDomId, $el.val());
+						}
+			
+						this.render();
+					}).bind(this))
+				.on('click', '.destroy', (function(e) {
+						todoData.destroyTodo($(e.target).closest('li').prop('id'));
+						this.render();
+					}).bind(this));
+
 		},
+		// End bindEvents function definition
+		
+
 		render: function () {
-			var todos = this.getFilteredTodos();
+			var activeTodos = todoData.list.filter(function(todo) { return !todo.completed; });
+			var todos;
+			if (this.filter === 'active') {
+				todos = activeTodos;
+			} else if (this.filter === 'completed') {
+				todos = todoData.list.filter(function(todo) { return todo.completed; });
+			} else {
+				todos = todoData.list;
+			}
 			$('#todo-list').html(this.todoTemplate(todos));
 			$('#main').toggle(todos.length > 0);
-			$('#toggle-all').prop('checked', this.getActiveTodos().length === 0);
-			this.renderFooter();
+			$('#toggle-all').prop('checked', activeTodos.length === 0);
+			this.renderFooter(todos.length, activeTodos.length);
 			$('#new-todo').focus();
-			util.store('todos-jquery', this.todos);
 		},
-		renderFooter: function () {
-			var todoCount = this.todos.length;
-			var activeTodoCount = this.getActiveTodos().length;
+		renderFooter: function (todoCount, activeTodoCount) {
 			var template = this.footerTemplate({
 				activeTodoCount: activeTodoCount,
 				activeTodoWord: util.pluralize(activeTodoCount, 'item'),
@@ -84,113 +214,13 @@ jQuery(function ($) {
 
 			$('#footer').toggle(todoCount > 0).html(template);
 		},
-		toggleAll: function (e) {
-			var isChecked = $(e.target).prop('checked');
 
-			this.todos.forEach(function (todo) {
-				todo.completed = isChecked;
-			});
-
-			this.render();
-		},
-		getActiveTodos: function () {
-			return this.todos.filter(function (todo) {
-				return !todo.completed;
-			});
-		},
-		getCompletedTodos: function () {
-			return this.todos.filter(function (todo) {
-				return todo.completed;
-			});
-		},
-		getFilteredTodos: function () {
-			if (this.filter === 'active') {
-				return this.getActiveTodos();
-			}
-
-			if (this.filter === 'completed') {
-				return this.getCompletedTodos();
-			}
-
-			return this.todos;
-		},
-		destroyCompleted: function () {
-			this.todos = this.getActiveTodos();
-			this.filter = 'all';
-			this.render();
-		},
-		// accepts an element from inside the `.item` div and
-		// returns the corresponding index in the `todos` array
-		indexFromEl: function (el) {
-			var id = $(el).closest('li').data('id');
-			var todos = this.todos;
-			var i = todos.length;
-
-			while (i--) {
-				if (todos[i].id === id) {
-					return i;
-				}
-			}
-		},
-		create: function (e) {
-			var $input = $(e.target);
-			var val = $input.val().trim();
-
-			if (e.which !== ENTER_KEY || !val) {
-				return;
-			}
-
-			this.todos.push({
-				id: util.uuid(),
-				title: val,
-				completed: false
-			});
-
-			$input.val('');
-
-			this.render();
-		},
-		toggle: function (e) {
-			var i = this.indexFromEl(e.target);
-			this.todos[i].completed = !this.todos[i].completed;
-			this.render();
-		},
-		edit: function (e) {
-			var $input = $(e.target).closest('li').addClass('editing').find('.edit');
-			$input.val($input.val()).focus();
-		},
-		editKeyup: function (e) {
-			if (e.which === ENTER_KEY) {
-				e.target.blur();
-			}
-
-			if (e.which === ESCAPE_KEY) {
-				$(e.target).data('abort', true).blur();
-			}
-		},
-		update: function (e) {
-			var el = e.target;
-			var $el = $(el);
-			var val = $el.val().trim();
-
-			if (!val) {
-				this.destroy(e);
-				return;
-			}
-
-			if ($el.data('abort')) {
-				$el.data('abort', false);
-			} else {
-				this.todos[this.indexFromEl(el)].title = val;
-			}
-
-			this.render();
-		},
-		destroy: function (e) {
-			this.todos.splice(this.indexFromEl(e.target), 1);
-			this.render();
-		}
 	};
+	// End definition of App object
+
+
+
+
 
 	App.init();
 });
